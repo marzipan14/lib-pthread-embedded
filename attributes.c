@@ -19,6 +19,7 @@
  *      59 Temple Place - Suite 330, Boston, MA 02111-1307, USA
  */
 
+#include <flexos/isolation.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -101,7 +102,7 @@ int pthread_getattr_np(pthread_t thread, pthread_attr_t *attr)
 	_attr->detachstate = (_uk_thread->detached
 		? PTHREAD_CREATE_DETACHED : PTHREAD_CREATE_JOINABLE);
 
-	rc = uk_thread_get_prio(_uk_thread, &prio);
+	flexos_gate_r(libuksched, rc, uk_thread_get_prio, _uk_thread, &prio);
 	if (rc == 0)
 		_attr->param.sched_priority = prio;
 

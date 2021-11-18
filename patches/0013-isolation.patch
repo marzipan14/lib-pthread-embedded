@@ -1,0 +1,13 @@
+diff --color -urNp pthread-embedded-44b41d760a433915d70a7be9809651b0a65e001d/pte_threadStart.c pthread-embedded-44b41d760a433915d70a7be9809651b0a65e001d-flexos/pte_threadStart.c
+--- pthread-embedded-44b41d760a433915d70a7be9809651b0a65e001d/pte_threadStart.c	2018-06-30 09:52:56.000000000 +0200
++++ pthread-embedded-44b41d760a433915d70a7be9809651b0a65e001d-flexos/pte_threadStart.c	2021-02-01 09:50:40.799583202 +0100
+@@ -77,6 +77,9 @@ pte_terminate ()
+ 
+ int pte_threadStart (void *vthreadParms)
+ {
++#if CONFIG_LIBFLEXOS_INTELPKU
++  wrpkru(0x3ffffffc);
++#endif /* CONFIG_LIBFLEXOS_INTELPKU */
+   ThreadParms * threadParms = (ThreadParms *) vthreadParms;
+   pthread_t self;
+   pte_thread_t * sp;

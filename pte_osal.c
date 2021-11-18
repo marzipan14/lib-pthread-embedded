@@ -26,6 +26,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <uk/essentials.h>
+#include <flexos/isolation.h>
 #include <uk/init.h>
 #include <uk/arch/time.h>
 #include <uk/arch/atomic.h>
@@ -34,7 +35,6 @@
 #include "pte_osal.h"
 #include "pthread.h"
 #include "tls-helper.h"
-
 
 typedef struct {
 	/* thread routine */
@@ -95,8 +95,9 @@ pte_osResult pte_osInit(void)
 		goto out;
 	}
 
-	crnt = uk_thread_current();
-	crnt->prv = ptd;
+	flexos_gate_r(libuksched, crnt, uk_thread_current);
+
+	flexos_gate(libuksched, uk_thread_set_private, crnt, ptd);
 	ptd->uk_thread = crnt;
 
 out:
@@ -124,16 +125,25 @@ int pte_kill(pte_osThreadHandle threadId, int sig)
 
 static pte_thread_data_t *handle_to_ptd(pte_osThreadHandle h)
 {
-	return h->prv;
+	pte_thread_data_t *res;
+	flexos_gate_r(libuksched, res, uk_thread_get_private, h);
+	return res;
 }
 
 static pte_thread_data_t *current_ptd(void)
 {
-	return uk_thread_current()->prv;
+	volatile struct uk_thread *thread;
+	volatile pte_thread_data_t *ptd;
+	flexos_gate_r(libuksched, thread, uk_thread_current);
+	flexos_gate_r(libuksched, ptd, uk_thread_get_private, thread);
+	return ptd;
 }
 
 static void uk_stub_thread_entry(void *argv)
 {
+#if CONFIG_LIBFLEXOS_INTELPKU
+	wrpkru(0x3ffffffc);
+#endif /* CONFIG_LIBFLEXOS_INTELPKU */
 	pte_thread_data_t *ptd = (pte_thread_data_t *) argv;
 
 	/* wait for the resume command */
@@ -148,7 +158,8 @@ pte_osResult pte_osThreadCreate(pte_osThreadEntryPoint entry_point,
 {
 	pte_thread_data_t *ptd;
 
-	ptd = malloc(sizeof(pte_thread_data_t));
+	/* HUGE HACK -- please do not share that much... */
+	ptd = flexos_malloc_whitelist(sizeof(pte_thread_data_t), libuksched);
 	if (!ptd)
 		return PTE_OS_NO_RESOURCES;
 
@@ -167,8 +178,8 @@ pte_osResult pte_osThreadCreate(pte_osThreadEntryPoint entry_point,
 	uk_semaphore_init(&ptd->cancel_sem, 0);
 	ptd->done = 0;
 
-	ptd->uk_thread = uk_thread_create_attr(NULL, NULL,
-		uk_stub_thread_entry, ptd);
+	flexos_gate_r(libuksched, ptd->uk_thread, uk_thread_create_attr, NULL,
+			NULL, uk_stub_thread_entry, ptd);
 	if (ptd->uk_thread == NULL) {
 		pteTlsThreadDestroy(ptd->tls);
 		free(ptd);
@@ -177,11 +188,10 @@ pte_osResult pte_osThreadCreate(pte_osThreadEntryPoint entry_point,
 
 #if CONFIG_LIBUKSIGNAL
 	/* inherit signal mask */
-	ptd->uk_thread->signals_container.mask =
-		uk_thread_current()->signals_container.mask;
+	flexos_gate(libuksched, uk_thread_inherit_signal_mask, ptd->uk_thread);
 #endif
 
-	ptd->uk_thread->prv = ptd;
+	flexos_gate(libuksched, uk_thread_set_private, ptd->uk_thread, ptd);
 
 	*ph = ptd->uk_thread;
 
@@ -212,7 +222,7 @@ pte_osResult pte_osThreadDelete(pte_osThreadHandle h)
 pte_osResult pte_osThreadExitAndDelete(pte_osThreadHandle h)
 {
 	if (h->sched)
-		uk_thread_kill(h);
+		flexos_gate(libuksched, uk_thread_kill, h);
 	pte_osThreadDelete(h);
 
 	return PTE_OS_OK;
@@ -223,7 +233,7 @@ void pte_osThreadExit(void)
 	pte_thread_data_t *ptd = current_ptd();
 
 	ptd->done = 1;
-	uk_sched_thread_exit();
+	flexos_gate(libuksched, uk_sched_thread_exit);
 }
 
 pte_osResult pte_osThreadWaitForEnd(pte_osThreadHandle h)
@@ -233,7 +243,7 @@ pte_osResult pte_osThreadWaitForEnd(pte_osThreadHandle h)
 
 	while (1) {
 		if (ptd->done) {
-			uk_thread_wait(ptd->uk_thread);
+			flexos_gate(libuksched, uk_thread_wait, ptd->uk_thread);
 			return PTE_OS_OK;
 		}
 
@@ -241,7 +251,7 @@ pte_osResult pte_osThreadWaitForEnd(pte_osThreadHandle h)
 			return PTE_OS_INTERRUPTED;
 
 		else
-			uk_sched_yield();
+			flexos_gate(libuksched, uk_sched_yield);
 	}
 }
 
@@ -266,24 +276,28 @@ pte_osResult pte_osThreadCheckCancel(pte_osThreadHandle h)
 
 pte_osThreadHandle pte_osThreadGetHandle(void)
 {
-	return uk_thread_current();
+	struct uk_thread *cur;
+	flexos_gate_r(libuksched, cur, uk_thread_current);
+	return cur;
 }
 
 int pte_osThreadGetPriority(pte_osThreadHandle h)
 {
+	int ret;
 	pte_thread_data_t *ptd = handle_to_ptd(h);
 	prio_t prio;
 
-	int ret = uk_thread_get_prio(ptd->uk_thread, &prio);
+	flexos_gate_r(libuksched, ret, uk_thread_get_prio, ptd->uk_thread, &prio);
 
 	return ret ? PTE_OS_GENERAL_FAILURE : PTE_OS_OK;
 }
 
 pte_osResult pte_osThreadSetPriority(pte_osThreadHandle h, int new_prio)
 {
+	int ret;
 	pte_thread_data_t *ptd = handle_to_ptd(h);
 
-	int ret = uk_thread_set_prio(ptd->uk_thread, new_prio);
+	flexos_gate_r(libuksched, ret, uk_thread_set_prio, ptd->uk_thread, new_prio);
 
 	return ret ? PTE_OS_GENERAL_FAILURE : PTE_OS_OK;
 }
@@ -292,7 +306,7 @@ void pte_osThreadSleep(unsigned int msecs)
 {
 	__nsec nsec = ukarch_time_msec_to_nsec(msecs);
 
-	uk_sched_thread_sleep(nsec);
+	flexos_gate(libuksched, uk_sched_thread_sleep, nsec);
 }
 
 int pte_osThreadGetMinPriority(void)
@@ -323,7 +337,7 @@ pte_osResult pte_osMutexCreate(pte_osMutexHandle *ph)
 	if (!ph)
 		return PTE_OS_INVALID_PARAM;
 
-	m = malloc(sizeof(struct uk_mutex));
+	m = flexos_malloc_whitelist(sizeof(struct uk_mutex), libuksched);
 	if (!m)
 		return PTE_OS_NO_RESOURCES;
 
@@ -384,7 +398,7 @@ pte_osResult pte_osSemaphoreCreate(int init_value, pte_osSemaphoreHandle *ph)
 	if (!ph)
 		return PTE_OS_INVALID_PARAM;
 
-	s = malloc(sizeof(struct uk_semaphore));
+	s = flexos_malloc_whitelist(sizeof(struct uk_semaphore), libuksched);
 	if (!s)
 		return PTE_OS_NO_RESOURCES;
 
@@ -400,7 +414,7 @@ pte_osResult pte_osSemaphoreDelete(pte_osSemaphoreHandle h)
 	if (!h)
 		return PTE_OS_INVALID_PARAM;
 
-	free(h);
+	flexos_free_whitelist(h, libuksched);
 
 	return PTE_OS_OK;
 }
@@ -466,7 +480,7 @@ pte_osResult pte_osSemaphoreCancellablePend(pte_osSemaphoreHandle h,
 
 		} else
 			/* Maybe next time... */
-			uk_sched_yield();
+			flexos_gate(libuksched, uk_sched_yield);
 	}
 
 	return result;
